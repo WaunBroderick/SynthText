@@ -6,7 +6,7 @@ import os.path as osp
 import random, os
 import cv2
 #import cPickle as cp
-import _pickle as cp
+import pickle as cp
 import scipy.signal as ssig
 import scipy.stats as sstat
 import pygame, pygame.locals
@@ -420,7 +420,7 @@ class FontState(object):
         # get character-frequencies in the English language:
         with open(char_freq_path,'rb') as f:
             #self.char_freq = cp.load(f)
-            u = pickle._Unpickler(f)
+            u = pickle.Unpickler(f)
             u.encoding = 'latin1'
             p = u.load()
             self.char_freq = p
@@ -428,7 +428,7 @@ class FontState(object):
         # get the model to convert from pixel to font pt size:
         with open(font_model_path,'rb') as f:
             #self.font_model = cp.load(f)
-            u = pickle._Unpickler(f)
+            u = pickle.Unpickler(f)
             u.encoding = 'latin1'
             p = u.load()
             self.font_model = p
