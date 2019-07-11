@@ -19,6 +19,11 @@ import os.path as osp
 from synthgen import *
 from common import *
 import wget, tarfile
+import cv2
+import json
+import boto3
+
+import glob
 
 
 ## Define some configuration variables:
@@ -32,6 +37,15 @@ DB_FNAME = osp.join(DATA_PATH,'dset.h5')
 # url of the data (google-drive public file):
 DATA_URL = 'http://www.robots.ox.ac.uk/~ankush/data.tar.gz'
 OUT_FILE = 'results/SynthText.h5'
+
+out_dir = "out"
+meta_dir = osp.join(out_dir, "meta")
+image_dir = osp.join(out_dir, "image")
+if not osp.exists(meta_dir):
+    os.makedirs(meta_dir)
+if not osp.exists(image_dir):
+    os.makedirs(image_dir)
+
 
 def get_data():
   """
@@ -59,22 +73,39 @@ def get_data():
   return h5py.File(DB_FNAME,'r')
 
 
-def add_res_to_db(imgname,res,db):
+def add_res_to_db(imgname, res, db):
   """
   Add the synthetically generated text image instance
   and other metadata to the dataset.
   """
   ninstance = len(res)
   for i in range(ninstance):
-    dname = "%s_%d"%(imgname, i)
-    db['data'].create_dataset(dname,data=res[i]['img'])
-    db['data'][dname].attrs['charBB'] = res[i]['charBB']
-    db['data'][dname].attrs['wordBB'] = res[i]['wordBB']        
-    #db['data'][dname].attrs['txt'] = res[i]['txt']
-    L = res[i]['txt']
-    L = [n.encode("ascii", "ignore") for n in L]
-    db['data'][dname].attrs['txt'] = L
+      dname = "%s_%d" % (imgname, i)
+      db['data'].create_dataset(dname, data=res[i]['img'])
+      db['data'][dname].attrs['logoBB'] = res[i]['logoBB']
+      # db['data'][dname].attrs['wordBB'] = res[i]['wordBB']
+      db['data'][dname].attrs['logoName'] = res[i]['logoName']
 
+
+def simple_bbox(bb):
+  return [bb[:, 0].min(), bb[:, 1].min(), bb[:, 0].max(), bb[:, 1].max()]
+
+
+def save_result(imgname, res, current_dict, count, image_num):
+  for n, r in enumerate(res):
+    ref = "%d-%d-%d.png" % (count, image_num, n)
+    if ref not in current_dict:
+      current_dict[ref] = {}
+    cv2.imwrite(osp.join(image_dir, ref), cv2.cvtColor(r['img'], cv2.COLOR_RGB2BGR))
+    print("bbs", r["logoBB"].T)
+    current_dict[ref] = [{"transformed_bbox": [list(b) for b in bb], "bbox": simple_bbox(bb), "name": name} for bb, name
+                         in zip(r["logoBB"].T, r["logoName"])]
+    # current_dict[ref]["logoBB"] = r["logoBB"]
+    # current_dict[ref]["logoName"] = r["logoName"]
+
+
+def get_logo_files(logo_dir):
+  return glob.glob(os.path.join(logo_dir, "*/*.*"))
 
 def main(viz=False):
   # open databases:

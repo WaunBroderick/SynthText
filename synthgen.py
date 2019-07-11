@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import os.path as osp
 import scipy.ndimage as sim
 import scipy.spatial.distance as ssd
+import scipy.signal as ssig
 import synth_utils as su
 import text_utils as tu
 from colorize3_poisson import Colorize
@@ -368,10 +369,11 @@ def viz_textbb(fignum,text_im, bb_list,alpha=1.0):
 
 class RendererV3(object):
 
-    def __init__(self, data_dir, max_time=None):
+    def __init__(self, data_dir, max_time=None, logos=None):
         self.text_renderer = tu.RenderFont(data_dir)
         self.colorizer = Colorize(data_dir)
         #self.colorizerV2 = colorV2.Colorize(data_dir)
+        self.logos = logos
 
         self.min_char_height = 8 #px
         self.min_asp_ratio = 0.4 #
@@ -497,6 +499,175 @@ class RendererV3(object):
             bsz = max(0.5, 1.5 + 0.5*np.random.randn())
             ksz = 5
         return cv2.GaussianBlur(text_mask,(ksz,ksz),bsz)
+
+
+    def robust_HW(self,mask):
+        m = mask.copy()
+        m = (~mask).astype('float')/255
+        rH = np.median(np.sum(m,axis=0))
+        rW = np.median(np.sum(m,axis=1))
+        return rH,rW
+    def sample_font_height_px(self,h_min,h_max):
+        if np.random.rand() < 0.10:
+            rnd = np.random.rand()
+        else:
+            rnd = np.random.beta(2.0,2.0)
+        h_range = h_max - h_min
+        f_h = np.floor(h_min + h_range*rnd)
+        return f_h
+    def bb_xywh2coords(self,bbs):
+        """
+        Takes an nx4 bounding-box matrix specified in x,y,w,h
+        format and outputs a 2x4xn bb-matrix, (4 vertices per bb).
+        """
+        n,_ = bbs.shape
+        coords = np.zeros((2,4,n))
+        for i in range(n):
+            coords[:,:,i] = bbs[i,:2][:,None]
+            coords[0,1,i] += bbs[i,2]
+            coords[:,2,i] += bbs[i,2:4]
+            coords[1,3,i] += bbs[i,3]
+        return coords
+    def actually_place_logo(self, text_arrs, back_arr, bbs, logos):
+        areas = [-np.prod(ta.shape) for ta in text_arrs]
+        order = np.argsort(areas)
+        locs = [None for i in range(len(text_arrs))]
+        out_arr = np.zeros_like(back_arr)
+        logo_out = np.zeros((back_arr.shape[0], back_arr.shape[1], logos[0].shape[2]), dtype=np.float32)
+        for i in order:
+            ba = np.clip(back_arr.copy().astype(np.float), 0, 255)
+            ta = np.clip(text_arrs[i].copy().astype(np.float), 0, 255)
+            ba[ba > 127] = 1e8
+            intersect = ssig.fftconvolve(ba,ta[::-1,::-1],mode='valid')
+            safemask = intersect < 1e8
+            if not np.any(safemask): # no collision-free position:
+                #warn("COLLISION!!!")
+                return back_arr,locs[:i],bbs[:i],order[:i], None
+            minloc = np.transpose(np.nonzero(safemask))
+            loc = minloc[np.random.choice(minloc.shape[0]),:]
+            locs[i] = loc
+            # update the bounding-boxes:
+            bbs[i] = bbs[i] + loc[::-1][:,None,None]
+            # blit the text onto the canvas
+            w,h = text_arrs[i].shape
+            out_arr[loc[0]:loc[0]+w,loc[1]:loc[1]+h] += text_arrs[i]
+            logo_out[loc[0]:loc[0]+w,loc[1]:loc[1]+h] += logos[i]
+        return out_arr, locs, bbs, order, logo_out
+
+    def pick_random_logos(self):
+        im = None
+        while im is None:
+            name = self.logos[np.random.randint(low=0, high=len(self.logos))]
+            im = cv2.imread(name, cv2.IMREAD_UNCHANGED)
+            short_name = osp.basename(name)
+        return im, short_name
+    def actually_render_logo(self, mask):
+        """
+        Places text in the "collision-free" region as indicated
+        in the mask -- 255 for unsafe, 0 for safe.
+        The text is rendered using FONT, the text content is TEXT.
+        """
+        #H,W = mask.shape
+        H,W = self.robust_HW(mask)
+        # f_asp = self.font_state.get_aspect_ratio(font)
+        min_logo_h = 40
+        max_logo_h = 300
+        max_shrink_trials = 50
+        # let's just place one text-instance for now
+        ## TODO : change this to allow multiple text instances?
+        i = 0
+        print ("Attempt")
+        while i < max_shrink_trials and max_logo_h > min_logo_h:
+            # if i > 0:
+            #     print colorize(Color.BLUE, "shrinkage trial : %d"%i, True)
+            # sample a random font-height:
+            logo_h_px = self.sample_font_height_px(min_logo_h, max_logo_h)
+            #print "font-height : %.2f (min: %.2f, max: %.2f)"%(f_h_px, self.min_font_h,max_font_h)
+            # update for the loop
+            max_logo_h = logo_h_px
+            i += 1
+            # compute the max-number of lines/chars-per-line:
+            # nline, nchar = self.get_nline_nchar(mask.shape[:2],f_h,f_h*f_asp)
+            # #print "  > nline = %d, nchar = %d"%(nline, nchar)
+            #
+            # assert nline >= 1 and nchar >= self.min_nchar
+            # sample text:
+            # text_type = sample_weighted(self.p_text)
+            # text = self.text_source.sample(nline,nchar,text_type)
+            # if len(text)==0 or np.any([len(line)==0 for line in text]):
+            #     continue
+            #print colorize(Color.GREEN, text)
+            logo, name = self.pick_random_logos()
+            # calculate logo width
+            logo_w = logo_h_px * (float(logo.shape[1]) / logo.shape[0])
+            print(logo_w, logo_h_px)
+            if logo_w >= W:
+                continue
+            # render the logo
+            if len(logo.shape) == 3 and logo.shape[2] == 4:
+                logo_arr = logo[:, :, 3]
+            else:
+                logo_arr = np.ones((logo.shape[0], logo.shape[1]))
+            logo_arr = cv2.resize(logo_arr, (int(logo_w), int(logo_h_px)))
+            logo = cv2.resize(logo, (int(logo_w), int(logo_h_px)))
+            logo_bb = np.array([[0, 0, logo_arr.shape[1], logo_arr.shape[0]]])
+            bb = self.bb_xywh2coords(logo_bb)
+            # make sure that the text-array is not bigger than mask array:
+            if np.any(np.r_[logo_arr.shape[:2]] > np.r_[mask.shape[:2]]):
+                # warn("text-array is bigger than mask")
+                continue
+            # position the text within the mask:
+            # logger.debug(VisualRecord("original logo", [logo, logo_arr]))
+            logo_mask,loc, bb, _, logo = self.actually_place_logo([logo_arr], mask, [bb], [logo])
+            # logger.debug(VisualRecord("positioned logo", [logo, logo_mask]))
+            if len(loc) > 0: # successful in placing the text collision-free:
+                return logo_mask,loc[0],bb[0], name, logo
+        return #None
+
+    def place_logo(self, rgb, collision_mask, H, Hinv):
+        # logo = cv2.imread("logos/nike.png", cv2.IMREAD_UNCHANGED)
+        # name = "nike"
+        render_res = self.actually_render_logo(collision_mask)
+        # self.text_renderer.render_sample(font, collision_mask)
+        if render_res is None:  # rendering not successful
+            return  # None
+        else:
+            logo_mask, loc, bb, logo_name, logo_detail = render_res
+        # update the collision mask with text:
+        collision_mask += (255 * (logo_mask > 0)).astype('uint8')
+        # warp the object mask back onto the image:
+        logo_mask_orig = logo_mask.copy()
+        bb_orig = bb.copy()
+        # logger.debug(VisualRecord("logo_pre_warp", [logo_mask, logo_detail]))
+        logo_mask = self.warpHomography(logo_mask, H, rgb.shape[:2][::-1])
+        logo_detail = self.warpHomography(logo_detail, H, rgb.shape[:2][::-1])
+        # print "logo mask detail", logo_mask.shape, logo_detail.shape
+        bb = self.homographyBB(bb, Hinv)
+        # if not self.bb_filter(bb_orig, bb, logo_name):
+        #     # warn("bad charBB statistics")
+        #     return  # None
+        # get the minimum height of the character-BB:
+        # min_h = self.get_min_h(bb, [logo_name])
+        min_h = np.abs(bb[0, 3, :] - bb[0, 0, :])
+        # feathering:
+        logo_mask = self.feather(logo_mask, min_h)
+        # print "logo mask detail2", logo_mask.shape, logo_detail.shape
+        # logger.debug(VisualRecord("logo", [logo_mask, logo_detail]))
+        #TODO deal with grayscale/color logos here
+        im_final = self.colorizer.color(rgb, [logo_mask], np.array([min_h]), logo_detail=[logo_detail])
+        # bbox_image = im_final.copy()
+        # for bbox in bb.copy().T:
+        #     print "bbox", bbox
+        #     for coord in bbox:
+        #         cv2.circle(bbox_image, (int(coord[0]), int(coord[1])), 5, (255,0,0), thickness=-1)
+            # cv2.circle(bbox_image, (bbox[0], bbox[2]), 5, (255, 0, 0), thickness=-1)
+            # cv2.circle(bbox_image, (bbox[3], bbox[2]), 5, (255, 0, 0), thickness=-1)
+            # cv2.circle(bbox_image, (bbox[3], bbox[1]), 5, (255, 0, 0), thickness=-1)
+        # logger.debug(VisualRecord("bboxes", imgs=[bbox_image]))
+        # im_final = rgb.copy()
+        return im_final, logo_name, bb, collision_mask
+
+
 
     def place_text(self,rgb,collision_mask,H,Hinv):
         font = self.text_renderer.font_state.sample()
@@ -694,3 +865,107 @@ class RendererV3(object):
                     if i < ninstance-1:
                         raw_input(colorize(Color.BLUE,'continue?',True))                    
         return res
+
+    def render_logo(self,rgb,depth, seg, area, label, ninstance=1, viz=False):
+        print("hold")
+
+        """
+        rgb   : HxWx3 image rgb values (uint8)
+        depth : HxW depth values (float)
+        seg   : HxW segmentation region masks
+        area  : number of pixels in each region
+        label : region labels == unique(seg) / {0}
+               i.e., indices of pixels in SEG which
+               constitute a region mask
+        ninstance : no of times image should be
+                    used to place text.
+                    
+        @return:
+            res : a list of dictionaries, one for each of
+                  the image instances.
+                  Each dictionary has the following structure:
+                      'img' : rgb-image with text on it.
+                      'bb'  : 2x4xn matrix of bounding-boxes
+                              for each character in the image.
+                      'txt' : a list of strings.
+                  The correspondence b/w bb and txt is that
+                  i-th non-space white-character in txt is at bb[:,:,i].
+            If there's an error in pre-text placement, for e.g. if there's
+            no suitable region for text placement, an empty list is returned.
+        """
+
+        try:
+            # depth -> xyz
+            xyz = su.DepthCamera.depth2xyz(depth)
+            # find text-regions:
+            regions = TextRegions.get_regions(xyz, seg, area, label)
+            # find the placement mask and homographies:
+            regions = self.filter_for_placement(xyz, seg, regions)
+            # finally place some text:
+            nregions = len(regions['place_mask'])
+            if nregions < 1:  # no good region to place text on
+                return []
+        except:
+            # failure in pre-text placement
+            # import traceback
+            traceback.print_exc()
+            return []
+        res = []
+        for i in range(ninstance):
+            place_masks = copy.deepcopy(regions['place_mask'])
+            print
+            colorize(Color.CYAN, " ** instance # : %d" % i)
+            idict = {'img': [], 'logoBB': None, 'logoName': None}
+            m = self.get_num_text_regions(nregions)
+            reg_idx = np.arange(min(2 * m, nregions))
+            np.random.shuffle(reg_idx)
+            reg_idx = reg_idx[:m]
+            placed = False
+            img = rgb.copy()
+            ilogo = []
+            ibb = []
+            # process regions:
+            num_txt_regions = len(reg_idx)
+            NUM_REP = np.random.randint(low=1, high=4)  # re-use each region three times:
+            reg_range = np.arange(NUM_REP * num_txt_regions) % num_txt_regions
+            for idx in reg_range:
+                ireg = reg_idx[idx]
+                try:
+                    if self.max_time is None:
+                        txt_render_res = self.place_logo(img, place_masks[ireg],
+                                                         regions['homography'][ireg],
+                                                         regions['homography_inv'][ireg])
+                    else:
+                        with time_limit(self.max_time):
+                            txt_render_res = self.place_logo(img, place_masks[ireg],
+                                                             regions['homography'][ireg],
+                                                             regions['homography_inv'][ireg])
+                except TimeoutException as msg:
+                    print(msg)
+                    continue
+                except:
+                    traceback.print_exc()
+                        #some error in placing text on the region
+                    continue
+                if txt_render_res is not None:
+                    placed = True
+                    img, logo, bb, collision_mask = txt_render_res
+                    # update the region collision mask:
+                    place_masks[ireg] = collision_mask
+                    # store the result:
+                    ilogo.append(logo)
+                    ibb.append(bb)
+            if placed:
+                # at least 1 word was placed in this instance:
+                idict['img'] = img
+                idict['logoName'] = ilogo
+                idict['logoBB'] = np.concatenate(ibb, axis=2)
+                res.append(idict.copy())
+                # if viz:
+                #     viz_textbb(1, img, [idict['logobb']], alpha=1.0)
+                #     # viz_masks(2, img, seg, depth, regions['label'])
+                #     # viz_regions(rgb.copy(),xyz,seg,regions['coeff'],regions['label'])
+                #     if i < ninstance - 1:
+                #         raw_input(colorize(Color.BLUE, 'continue?', True))
+        return res
+
